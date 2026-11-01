@@ -1,0 +1,45 @@
+# Runs when release-please publishes a release, and by hand to publish again if a run failed. A Go module has no
+# registry to push to: the release tag on a public repository is the release, and the Go module proxy fetches it
+# on first request. This workflow makes that first request, so the version is indexed at once and a tag the proxy
+# cannot fetch (a private repository, a module path that does not match) fails here rather than at a customer's
+# `go get`. A hand run targets the release tag: `gh workflow run publish-go.yml --ref v<version>`.
+name: Publish Go
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+concurrency:
+  group: publish-go
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: The version to publish
+        # A release's ref is its tag; a hand run must name one, so a branch is never offered to the proxy.
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "a hand run publishes a release tag: gh workflow run publish-go.yml --ref v<version>" >&2
+            exit 1
+          fi
+          echo "version=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Ask the Go module proxy for the version
+        env:
+          GOPROXY: https://proxy.golang.org
+          GOFLAGS: -mod=mod
+        run: |
+          module=github.com/${GITHUB_REPOSITORY}
+          cd "$(mktemp -d)"
+          go mod init probe >/dev/null 2>&1
+          go list -m "$module@$version"
+          curl -fsS "https://proxy.golang.org/$module/@v/$version.info"
+          echo
+          echo "proxy.golang.org serves $module@$version"
